@@ -1,0 +1,164 @@
+# Fleetbase CapRover Deployment Configuration
+
+# Dockerfile for CapRover deployment
+dockerfile: |
+  # syntax = docker/dockerfile:1.2
+  FROM dunglas/frankenphp:1.5.0-php8.2-bookworm
+
+  # Install packages
+  RUN apt-get update && apt-get install -y git bind9-utils mycli nodejs npm nano \
+    && mkdir -p /root/.ssh \
+    && ssh-keyscan github.com >> /root/.ssh/known_hosts
+
+  # Install PHP Extensions
+  RUN install-php-extensions \
+    pdo_mysql \
+    gd \
+    bcmath \
+    redis \
+    intl \
+    zip \
+    gmp \
+    apcu \
+    opcache \
+    memcached \
+    imagick \
+    sockets \
+    pcntl \
+    @composer
+
+  # Install build dependencies for GEOS
+  RUN apt-get update \
+      && apt-get install -y --no-install-recommends \
+         pkg-config \
+         libgeos-dev \
+         libgeos++-dev \
+         autoconf \
+         build-essential \
+         unzip \
+      && rm -rf /var/lib/apt/lists/*
+
+  # Download, extract, compile, and enable the php-geos extension
+  RUN curl -fsSL -o php-geos.zip \
+        https://github.com/libgeos/php-geos/archive/dfe1ab17b0f155cc315bc13c75689371676e02e1.zip \
+      && unzip php-geos.zip \
+      && rm php-geos.zip \
+      && cd php-geos-* \
+      && ./autogen.sh \
+      && ./configure \
+      && make -j"$(nproc)" install \
+      && docker-php-ext-enable geos \
+      && cd .. \
+      && rm -rf php-geos-*
+
+  # Update PHP configurations
+  RUN sed -e 's/^expose_php.*/expose_php = Off/' "$PHP_INI_DIR/php.ini-production" > "$PHP_INI_DIR/php.ini" \
+    && sed -i -e 's/^upload_max_filesize.*/upload_max_filesize = 600M/' -e 's/^post_max_size.*/post_max_size = 0/' \
+    -e 's/^memory_limit.*/memory_limit = 600M/' "$PHP_INI_DIR/php.ini"
+
+  # Install global node modules
+  RUN npm install -g chokidar pnpm ember-cli npm-cli-login
+
+  # Create the pnpm directory and set the PNPM_HOME environment variable
+  RUN mkdir -p ~/.pnpm
+  ENV PNPM_HOME /root/.pnpm
+
+  # Add the pnpm global bin to the PATH
+  ENV PATH /root/.pnpm/bin:$PATH
+
+  # Set some build ENV variables
+  ENV LOG_CHANNEL=stdout
+  ENV CACHE_DRIVER=redis
+  ENV BROADCAST_DRIVER=socketcluster
+  ENV QUEUE_CONNECTION=redis
+  ENV OCTANE_SERVER=frankenphp
+
+  # Set environment
+  ENV APP_ENV=production
+
+  # Create /app directory and set correct permissions
+  RUN mkdir -p /app/api && mkdir -p /app/console && chown -R www-data:www-data /app
+
+  # Set working directory
+  WORKDIR /app/api
+
+  # Copy application files
+  COPY ./api /app/api
+  COPY ./console/dist /app/console
+
+  # Set permissions
+  RUN chown -R www-data:www-data /app
+
+  # Setup logging
+  RUN mkdir -p /app/api/storage/logs/ && touch /app/api/storage/logs/laravel-$(date +'%Y-%m-%d').log
+  RUN chown -R www-data:www-data /app/api/storage
+  RUN chmod -R 755 /app/api/storage
+
+  # Set permissions for deploy script
+  RUN chmod +x /app/api/deploy.sh
+
+  # Install dependencies
+  RUN cd /app/api && composer install --no-dev --optimize-autoloader
+
+  # Expose port
+  EXPOSE 80
+
+  # Start FrankenPHP
+  CMD ["php", "artisan", "octane:frankenphp", "--max-requests=250", "--port=80", "--host=0.0.0.0"]
+
+# Captain definition file for CapRover
+captain_definition: |
+  {
+    "schemaVersion": 2,
+    "dockerfilePath": "./Dockerfile"
+  }
+
+# Environment variables needed for Fleetbase
+environment_variables:
+  - APP_NAME=Fleetbase
+  - APP_ENV=production
+  - APP_KEY=base64:YOUR_APP_KEY_HERE
+  - APP_DEBUG=false
+  - APP_URL=https://your-caprover-app-url.example.com
+  - LOG_CHANNEL=daily
+  - DB_CONNECTION=mysql
+  - DB_HOST=srv-captain--your-mysql-db
+  - DB_PORT=3306
+  - DB_DATABASE=fleetbase
+  - DB_USERNAME=fleetbase_user
+  - DB_PASSWORD=your_secure_password
+  - REDIS_HOST=srv-captain--your-redis
+  - REDIS_PASSWORD=null
+  - REDIS_PORT=6379
+  - MAIL_MAILER=smtp
+  - MAIL_HOST=your-smtp-host
+  - MAIL_PORT=587
+  - MAIL_USERNAME=your-mail-username
+  - MAIL_PASSWORD=your-mail-password
+  - MAIL_ENCRYPTION=tls
+  - MAIL_FROM_ADDRESS=no-reply@example.com
+  - MAIL_FROM_NAME=Fleetbase
+  - OSRM_HOST=https://router.project-osrm.org
+  - SOCKETCLUSTER_HOST=your-socketcluster-host
+  - CONSOLE_HOST=https://your-console-url.example.com
+
+# Persistent directories that should be mounted as volumes
+persistent_directories:
+  - /app/api/storage
+  - /app/api/bootstrap/cache
+
+# CapRover deployment instructions
+deployment_instructions: |
+  To deploy Fleetbase on CapRover:
+  
+  1. Create a new app in CapRover dashboard
+  2. Set up the required environment variables
+  3. Create MySQL and Redis services in CapRover
+  4. Deploy this configuration using the CapRover CLI or web interface
+  5. After deployment, run the following commands to set up the database:
+     - Connect to the app container and run: `php artisan migrate --force`
+     - Then run: `php artisan fleetbase:seed`
+     - And: `php artisan fleetbase:create-permissions`
+  
+  Note: For production use, make sure to set proper values for all environment variables,
+  especially APP_KEY, database credentials, and mail settings. 
